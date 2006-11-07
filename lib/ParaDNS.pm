@@ -4,7 +4,8 @@ package ParaDNS;
 # hosts you want to query, plus the callback. All the hard work is done
 # in ParaDNS::Resolver.
 
-our $VERSION = '1.0';
+our $VERSION = '1.1';
+our $TIMEOUT = 10;
 
 use fields qw(client hosts num_hosts callback finished results start);
 use strict;
@@ -15,7 +16,8 @@ my $resolver;
 
 sub trace {
     my $level = shift;
-    print STDERR ("[$$] dns lookup: @_") if $::DEBUG >= $level;
+    return unless $ENV{PARADNS_DEBUG};
+    print STDERR ("$ENV{PARADNS_DEBUG}/$level [$$] dns lookup: @_") if $ENV{PARADNS_DEBUG} >= $level;
 }
 
 sub new {

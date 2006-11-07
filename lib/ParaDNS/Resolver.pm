@@ -9,10 +9,7 @@ use strict;
 
 our $last_cleanup = 0;
 
-sub trace {
-    my $level = shift;
-    print ("$::DEBUG/$level [$$] dns lookup: @_") if $::DEBUG >= $level;
-}
+*trace = \&ParaDNS::trace;
 
 sub new {
     my ParaDNS::Resolver $self = shift;
@@ -158,7 +155,7 @@ sub _do_cleanup {
         $self->{queries}->{$id} = $query;
     }
     
-    foreach my $type ('A', 'TXT', 'MX') {
+    foreach my $type (keys( %{ $self->{cache_timeout} } )) {
         @to_delete = ();
         
         while (my ($query, $t) = each(%{$self->{cache_timeout}{$type}})) {
@@ -175,7 +172,7 @@ sub _do_cleanup {
 }
 
 # seconds max timeout!
-sub max_idle_time { 30 }
+sub max_idle_time { $ParaDNS::TIMEOUT }
 
 # ParaDNS
 sub event_err { shift->close("dns socket error") }
@@ -234,6 +231,20 @@ sub event_read {
         if (!$answers) {
             if ($err eq "NXDOMAIN") {
                 # trace("found => NXDOMAIN\n");
+                my ($auth) = $packet->authority;
+                if ($auth) {
+                    # if there's an SOA, cache according to the TTL
+                    
+                    # NOTE: There's a bug here - NXDOMAIN should be cached
+                    # across all query types when we see it. But here we still
+                    # key on $type to make the code easier.
+                    my $timeout = $auth->ttl;
+                    if ($auth->minimum < $timeout) {
+                        $timeout = $auth->minimum;
+                    }
+                    $self->{cache}{$qobj->{type}}{$query} = "NXDOMAIN";
+                    $self->{cache_timeout}{$qobj->{type}}{$query} = $now + $timeout;
+                }
                 $qobj->run_callback("NXDOMAIN");
             }
             elsif ($err eq "SERVFAIL") {
@@ -275,10 +286,7 @@ use fields qw( resolver asker host type timeout id data repeat ns nqueries );
 
 use constant MAX_QUERIES => 10;
 
-sub trace {
-    my $level = shift;
-    print ("$::DEBUG/$level [$$] dns lookup: @_") if $::DEBUG >= $level;
-}
+*trace = \&ParaDNS::trace;
 
 sub new {
     my ParaDNS::Resolver::Query $self = shift;

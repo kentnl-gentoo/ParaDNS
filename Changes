@@ -1,0 +1,8 @@
+ParaDNS Changes
+
+1.1
+
+    - Cache NXDOMAIN lookups according to RFC 2308
+    - Allow timeout to be set ($ParaDNS::TIMEOUT)
+    - Drop per-resolver timeout to 10 seconds
+

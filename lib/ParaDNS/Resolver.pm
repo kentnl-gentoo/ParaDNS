@@ -1,15 +1,21 @@
 package ParaDNS::Resolver;
 use base qw(Danga::Socket);
 
-use fields qw(res dst cache cache_timeout queries);
+use fields qw(res dst queries);
 
 use Net::DNS;
 use Socket;
 use strict;
 
-our $last_cleanup = 0;
+no warnings 'deprecated';
 
 *trace = \&ParaDNS::trace;
+
+use constant CACHE_CLEAN_INTERVAL => 60;
+
+my %cache_value;
+my %cache_timeout;
+my $cache_cleanup;
 
 sub new {
     my ParaDNS::Resolver $self = shift;
@@ -34,15 +40,26 @@ sub new {
     }
     
     $self->{res} = $res;
+    
+    # copied from SpamAssassin (I think all are irrelevant, but just in case...)
+    $self->{res}->retry(1);           # If it fails, it fails
+    $self->{res}->retrans(0);         # If it fails, it fails
+    $self->{res}->dnsrch(0);          # ignore domain search-list
+    $self->{res}->defnames(0);        # don't append stuff to end of query
+    # I think these values are irrelevant...
+    $self->{res}->tcp_timeout($ParaDNS::TIMEOUT);     # timeout
+    $self->{res}->udp_timeout($ParaDNS::TIMEOUT);     # timeout
+    $self->{res}->persistent_tcp(0);  # bug 3997
+    $self->{res}->persistent_udp(0);  # bug 3997
+    
     $self->{queries} = {};
-    $self->{cache} = {};
-    $self->{cache_timeout} = {};
     
     $self->SUPER::new($sock);
     
-    $self->watch_read(1);
+    $cache_cleanup ||= Danga::Socket->AddTimer(CACHE_CLEAN_INTERVAL, \&_cache_cleanup);
+    Danga::Socket->AddTimer(1, sub { $self->_do_cleanup });
     
-    $self->AddTimer(5, sub { $self->_do_cleanup });
+    $self->watch_read(1);
     
     return $self;
 }
@@ -68,10 +85,10 @@ sub _query {
         $asker->run_callback("NXDNS", $host);
         return 1;
     }
-    if (exists($self->{cache}{$type}{$host}) &&
-        $self->{cache_timeout}{$type}{$host} >= $now) {
+    if (exists($cache_value{$type}{$host}) &&
+               $cache_timeout{$type}{$host} >= $now) {
         # print "CACHE HIT!\n";
-        my $result = $self->{cache}{$type}{$host};
+        my $result = $cache_value{$type}{$host};
         $self->AddTimer(0, sub {
             $asker->run_callback($result, $host);
             });
@@ -137,11 +154,10 @@ sub _do_cleanup {
     my ParaDNS::Resolver $self = shift;
     my $now = time;
     
-    $self->AddTimer(5, sub { $self->_do_cleanup });
-    
-    my $idle = $self->max_idle_time;
+    my $idle = $ParaDNS::TIMEOUT;
     
     my @to_delete;
+    keys %{$self->{queries}}; # reset internal iterator
     while (my ($id, $obj) = each(%{$self->{queries}})) {
         if ($obj->{timeout} < ($now - $idle)) {
             push @to_delete, $id;
@@ -154,25 +170,31 @@ sub _do_cleanup {
         # add back in if timeout caused us to loop to next server
         $self->{queries}->{$id} = $query;
     }
+
+    $self->AddTimer(1, sub { $self->_do_cleanup } );
+}
+
+sub _cache_cleanup {
+    my $now = time;
     
-    foreach my $type (keys( %{ $self->{cache_timeout} } )) {
-        @to_delete = ();
+    foreach my $type (keys(%cache_timeout)) {
+        my @to_delete;
         
-        while (my ($query, $t) = each(%{$self->{cache_timeout}{$type}})) {
+        keys %{$cache_timeout{$type}}; # reset internal iterator
+        while (my ($query, $t) = each(%{$cache_timeout{$type}})) {
             if ($t < $now) {
                 push @to_delete, $query;
             }
         }
         
         foreach my $q (@to_delete) {
-            delete $self->{cache_timeout}{$type}{$q};
-            delete $self->{cache}{$type}{$q};
+            delete $cache_timeout{$type}{$q};
+            delete $cache_value{$type}{$q};
          }
      }
-}
 
-# seconds max timeout!
-sub max_idle_time { $ParaDNS::TIMEOUT }
+     $cache_cleanup = Danga::Socket->AddTimer(CACHE_CLEAN_INTERVAL, \&_cache_cleanup);
+}
 
 # ParaDNS
 sub event_err { shift->close("dns socket error") }
@@ -211,15 +233,15 @@ sub event_read {
                 my $type = $rr->type;
                 $type = 'A' if $type eq 'PTR';
                 # print "DNS Lookup $type $query = $host; TTL = ", $rr->ttl, "\n";
-                $self->{cache}{$type}{$query} = $host;
-                $self->{cache_timeout}{$type}{$query} = $now + $rr->ttl;
+                $cache_value{$type}{$query} = $host;
+                $cache_timeout{$type}{$query} = $now + $rr->ttl;
                 $qobj->run_callback($host);
             }
             elsif ($rr->type eq "MX") {
                 my $host = $rr->exchange;
                 my $preference = $rr->preference;
-                $self->{cache}{MX}{$query} = [$host, $preference];
-                $self->{cache_timeout}{MX}{$query} = $now + $rr->ttl;
+                $cache_value{MX}{$query} = [$host, $preference];
+                $cache_timeout{MX}{$query} = $now + $rr->ttl;
                 $qobj->run_callback([$host, $preference]);
             }
             else {
@@ -242,8 +264,8 @@ sub event_read {
                     if ($auth->minimum < $timeout) {
                         $timeout = $auth->minimum;
                     }
-                    $self->{cache}{$qobj->{type}}{$query} = "NXDOMAIN";
-                    $self->{cache_timeout}{$qobj->{type}}{$query} = $now + $timeout;
+                    $cache_value{$qobj->{type}}{$query} = "NXDOMAIN";
+                    $cache_timeout{$qobj->{type}}{$query} = $now + $timeout;
                 }
                 $qobj->run_callback("NXDOMAIN");
             }
@@ -294,7 +316,7 @@ sub new {
     
     @$self{qw( resolver asker host type timeout id data )} = @_;
     # repeat is number of retries
-    @$self{qw( repeat ns nqueries )} = (2,0,0);
+    @$self{qw( repeat ns nqueries )} = ($ParaDNS::REQUERY,0,0);
     
     trace(2, "NS Query: $self->{host} ($self->{id})\n");
     

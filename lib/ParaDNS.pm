@@ -4,15 +4,24 @@ package ParaDNS;
 # hosts you want to query, plus the callback. All the hard work is done
 # in ParaDNS::Resolver.
 
-our $VERSION = '1.1';
-our $TIMEOUT = 10;
+our $VERSION = '1.3';
+our $TIMEOUT = $ENV{PARADNS_TIMEOUT} || 10;
+our $REQUERY = $ENV{PARADNS_REQUERY} || 2;
+our $NUM_RESOLVER = 10;
 
 use fields qw(client hosts num_hosts callback finished results start);
 use strict;
 
-use ParaDNS::Resolver;
+no warnings 'deprecated';
 
-my $resolver;
+use ParaDNS::Resolver;
+use constant XS_AVAILABLE => eval { require ParaDNS::XS; };
+
+if (XS_AVAILABLE) {
+    ParaDNS::XS::setup();
+}
+
+my @RESOLVER;
 
 sub trace {
     my $level = shift;
@@ -20,12 +29,19 @@ sub trace {
     print STDERR ("$ENV{PARADNS_DEBUG}/$level [$$] dns lookup: @_") if $ENV{PARADNS_DEBUG} >= $level;
 }
 
+sub get_resolver {
+    my $id = int(rand($NUM_RESOLVER));
+    my $res = $RESOLVER[$id];
+    if (!$res) {
+        $res = $RESOLVER[$id] = ParaDNS::Resolver->new();
+    }
+    return $res;
+}
+
 sub new {
     my ParaDNS $self = shift;
     my %options = @_;
 
-    $resolver ||= ParaDNS::Resolver->new();
-    
     my $client = $options{client};
     $client->pause_read() if $client;
     
@@ -39,6 +55,32 @@ sub new {
     $self->{results} = {};
     $self->{start} = time;
 
+    if (XS_AVAILABLE) {
+        $options{type} ||= "A";
+        my $callback = sub {
+            $self->run_xs_callback(@_);
+        };
+        if ($options{type} eq "A") {
+            for my $host (@{$self->{hosts}}) {
+                if ($host =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/) {
+                    ParaDNS::XS::dnsquery("PTR", "$4.$3.$2.$1.in-addr.arpa",
+                                          $callback);
+                }
+                else {
+                    ParaDNS::XS::dnsquery("A", $host, $callback);
+                }
+            }
+        }
+        else {
+            for my $host (@{$self->{hosts}}) {
+                ParaDNS::XS::dnsquery($options{type}, $host, $callback);
+            }
+        }
+        return;
+    }
+
+    my $resolver = get_resolver();
+    
     if ($options{type}) {
         if ( ($options{type} eq 'A') || ($options{type} eq 'PTR') ) {
             if (!$resolver->query($self, @{$self->{hosts}})) {
@@ -74,6 +116,44 @@ sub run_callback {
     };
     if ($@) {
         warn($@);
+    }
+}
+
+my %type_to_host = (
+    PTR   => 'dname',
+    A     => 'address',
+    AAAA  => 'address',
+    TXT   => 'txtdata',
+    NS    => 'dname',
+    CNAME => 'dname',
+);
+
+sub run_xs_callback {
+    my ParaDNS $self = shift;
+    my $data = shift;
+    my $query = $data->{questions}[0]{question};
+    if ($data->{questions}[0]{type} eq 'PTR') {
+        $query =~ s/^(\d+)\.(\d+)\.(\d+)\.(\d+)\.in-addr\.arpa/$4.$3.$2.$1/;
+    }
+    for my $answer (@{$data->{answers}}) {
+        my $result;
+        if (my $param = $type_to_host{$answer->{type}}) {
+            $result = $answer->{$param};
+        }
+        elsif ($answer->{type} eq "MX") {
+            $result = [$answer->{exchange}, $answer->{preference}];
+        }
+        else {
+            die "Unimplemented query type: $answer->{type}";
+        }
+        $self->{results}{$query} = $result;
+        trace(2, "got => $result\n");
+        $self->{callback}->($result, $query);
+    }
+    if (!$self->{results}{$query}) {
+        $self->{results}{$query} = 'NXDOMAIN';
+        trace(2, "got $query => NXDOMAIN\n");
+        $self->{callback}->("NXDOMAIN", $query);
     }
 }
 

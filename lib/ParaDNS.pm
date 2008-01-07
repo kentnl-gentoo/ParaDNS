@@ -4,7 +4,7 @@ package ParaDNS;
 # hosts you want to query, plus the callback. All the hard work is done
 # in ParaDNS::Resolver.
 
-our $VERSION = '1.3';
+our $VERSION = '1.4';
 our $TIMEOUT = $ENV{PARADNS_TIMEOUT} || 10;
 our $REQUERY = $ENV{PARADNS_REQUERY} || 2;
 our $NUM_RESOLVER = 10;
@@ -108,11 +108,12 @@ sub new {
 
 sub run_callback {
     my ParaDNS $self = shift;
-    my ($result, $query) = @_;
+    my ($result, $query, $ttl) = @_;
     $self->{results}{$query} = $result;
+    $ttl ||= 0;
     trace(2, "got $query => $result\n");
     eval {
-        $self->{callback}->($result, $query);
+        $self->{callback}->($result, $query, $ttl);
     };
     if ($@) {
         warn($@);
@@ -215,8 +216,8 @@ Example:
 =item B<[required]> C<callback>
 
 The callback to call when results come in. This should be a reference to a
-subroutine. The callback receives two parameters - the result of the DNS lookup
-and the host that was looked up.
+subroutine. The callback receives three parameters - the result of the DNS lookup,
+the host that was looked up, and the TTL (in seconds).
 
 =item C<host>
 

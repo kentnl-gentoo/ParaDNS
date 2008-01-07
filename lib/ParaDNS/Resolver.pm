@@ -13,8 +13,7 @@ no warnings 'deprecated';
 
 use constant CACHE_CLEAN_INTERVAL => 60;
 
-my %cache_value;
-my %cache_timeout;
+my %cache;
 my $cache_cleanup;
 
 sub new {
@@ -85,12 +84,13 @@ sub _query {
         $asker->run_callback("NXDNS", $host);
         return 1;
     }
-    if (exists($cache_value{$type}{$host}) &&
-               $cache_timeout{$type}{$host} >= $now) {
+    if (exists($cache{$type}{$host}) &&
+               $cache{$type}{$host}{timeout} >= $now) {
         # print "CACHE HIT!\n";
-        my $result = $cache_value{$type}{$host};
+        my $result = $cache{$type}{$host}{value};
+        my $ttl = $cache{$type}{$host}{ttl};
         $self->AddTimer(0, sub {
-            $asker->run_callback($result, $host);
+            $asker->run_callback($result, $host, $ttl);
             });
         return 1;
     }
@@ -177,19 +177,19 @@ sub _do_cleanup {
 sub _cache_cleanup {
     my $now = time;
     
-    foreach my $type (keys(%cache_timeout)) {
+    foreach my $type (keys(%cache)) {
         my @to_delete;
         
-        keys %{$cache_timeout{$type}}; # reset internal iterator
-        while (my ($query, $t) = each(%{$cache_timeout{$type}})) {
+        keys %{$cache{$type}}; # reset internal iterator
+        for my $query (keys(%{$cache{$type}})) {
+            my $t = $cache{$type}{$query}{timeout};
             if ($t < $now) {
                 push @to_delete, $query;
             }
         }
         
         foreach my $q (@to_delete) {
-            delete $cache_timeout{$type}{$q};
-            delete $cache_value{$type}{$q};
+            delete $cache{$type}{$q};
          }
      }
 
@@ -233,16 +233,22 @@ sub event_read {
                 my $type = $rr->type;
                 $type = 'A' if $type eq 'PTR';
                 # print "DNS Lookup $type $query = $host; TTL = ", $rr->ttl, "\n";
-                $cache_value{$type}{$query} = $host;
-                $cache_timeout{$type}{$query} = $now + $rr->ttl;
-                $qobj->run_callback($host);
+                $cache{$type}{$query} = {
+                    value => $host,
+                    timeout => $now + $rr->ttl,
+                    ttl => $rr->ttl,
+                };
+                $qobj->run_callback($host, $rr->ttl);
             }
             elsif ($rr->type eq "MX") {
                 my $host = $rr->exchange;
                 my $preference = $rr->preference;
-                $cache_value{MX}{$query} = [$host, $preference];
-                $cache_timeout{MX}{$query} = $now + $rr->ttl;
-                $qobj->run_callback([$host, $preference]);
+                $cache{MX}{$query} = {
+                    value => [$host, $preference],
+                    timeout => $now + $rr->ttl,
+                    ttl => $rr->ttl,
+                };
+                $qobj->run_callback($cache{MX}{$query}{value}, $rr->ttl);
             }
             else {
                 # came back, but not a PTR or A record
@@ -264,8 +270,11 @@ sub event_read {
                     if ($auth->minimum < $timeout) {
                         $timeout = $auth->minimum;
                     }
-                    $cache_value{$qobj->{type}}{$query} = "NXDOMAIN";
-                    $cache_timeout{$qobj->{type}}{$query} = $now + $timeout;
+                    $cache{$qobj->{type}}{$query} = {
+                        value => "NXDOMAIN",
+                        timeout => $now + $timeout,
+                        ttl => $timeout,
+                    };
                 }
                 $qobj->run_callback("NXDOMAIN");
             }
@@ -386,7 +395,7 @@ sub error {
 sub run_callback {
     my ParaDNS::Resolver::Query $self = shift;
     trace(2, "NS Query callback($self->{host} = $_[0]\n");
-    $self->{asker}->run_callback($_[0], $self->{host});
+    $self->{asker}->run_callback($_[0], $self->{host}, $_[1]);
 }
 
 sub send_query {

@@ -9,15 +9,12 @@ use strict;
 
 no warnings 'deprecated';
 
+use constant TRACE_LEVEL => ($ENV{PARADNS_DEBUG} || 0);
 *trace = \&ParaDNS::trace;
-
-use constant CACHE_CLEAN_INTERVAL => 60;
-
-my %cache;
-my $cache_cleanup;
 
 sub new {
     my ParaDNS::Resolver $self = shift;
+    my $servers = shift;
     
     $self = fields::new($self) unless ref $self;
     
@@ -32,12 +29,23 @@ sub new {
     
     $self->{dst} = [];
     
-    foreach my $ns (@{ $res->{nameservers} }) {
-        trace(2, "Using nameserver $ns:$res->{port}\n");
-        my $dst_sockaddr = sockaddr_in($res->{'port'}, inet_aton($ns));
-        push @{$self->{dst}}, $dst_sockaddr;
+    if ($servers) {
+        foreach my $ns (@{$servers}) {
+            my ($s, $p) = split(/:/, $ns);
+            $p = 53 if !$p;
+            my $dst_sockaddr = sockaddr_in($p, inet_aton($s));
+            push @{$self->{dst}}, $dst_sockaddr;
+            trace(2, "Using override nameserver $s:$p\n");
+        }
+    } 
+    else {
+        foreach my $ns (@{ $res->{nameservers} }) {
+            trace(2, "Using nameserver $ns:$res->{port}\n");
+            my $dst_sockaddr = sockaddr_in($res->{'port'}, inet_aton($ns));
+            push @{$self->{dst}}, $dst_sockaddr;
+        }
     }
-    
+ 
     $self->{res} = $res;
     
     # copied from SpamAssassin (I think all are irrelevant, but just in case...)
@@ -55,7 +63,6 @@ sub new {
     
     $self->SUPER::new($sock);
     
-    $cache_cleanup ||= Danga::Socket->AddTimer(CACHE_CLEAN_INTERVAL, \&_cache_cleanup);
     Danga::Socket->AddTimer(1, sub { $self->_do_cleanup });
     
     $self->watch_read(1);
@@ -80,21 +87,6 @@ sub _query {
     my ParaDNS::Resolver $self = shift;
     my ($asker, $host, $type, $now) = @_;
     
-    if ($ENV{NODNS}) {
-        $asker->run_callback("NXDNS", $host);
-        return 1;
-    }
-    if (exists($cache{$type}{$host}) &&
-               $cache{$type}{$host}{timeout} >= $now) {
-        # print "CACHE HIT!\n";
-        my $result = $cache{$type}{$host}{value};
-        my $ttl = $cache{$type}{$host}{ttl};
-        $self->AddTimer(0, sub {
-            $asker->run_callback($result, $host, $ttl);
-            });
-        return 1;
-    }
-    
     my $packet = $self->{res}->make_query_packet($host, $type);
     
     my $packet_data = $packet->data;
@@ -114,7 +106,7 @@ sub query_type {
     
     my $now = time();
     
-    trace(2, "Trying to resolve $type: @hosts\n");
+    trace(2, "Trying to resolve $type: @hosts\n") if TRACE_LEVEL >= 2;
 
     foreach my $host (@hosts) {
         $self->_query($asker, $host, $type, $now) || return;
@@ -141,7 +133,7 @@ sub query {
     
     my $now = time();
     
-    trace(2, "trying to resolve A/PTR: @hosts\n");
+    trace(2, "trying to resolve A/PTR: @hosts\n") if TRACE_LEVEL >= 2;
 
     foreach my $host (@hosts) {
         $self->_query($asker, $host, 'A', $now) || return;
@@ -156,10 +148,12 @@ sub _do_cleanup {
     
     my $idle = $ParaDNS::TIMEOUT;
     
+    my $t0 = $now - $idle;
+    
     my @to_delete;
     keys %{$self->{queries}}; # reset internal iterator
     while (my ($id, $obj) = each(%{$self->{queries}})) {
-        if ($obj->{timeout} < ($now - $idle)) {
+        if ($obj->{timeout} < $t0) {
             push @to_delete, $id;
         }
     }
@@ -172,28 +166,6 @@ sub _do_cleanup {
     }
 
     $self->AddTimer(1, sub { $self->_do_cleanup } );
-}
-
-sub _cache_cleanup {
-    my $now = time;
-    
-    foreach my $type (keys(%cache)) {
-        my @to_delete;
-        
-        keys %{$cache{$type}}; # reset internal iterator
-        for my $query (keys(%{$cache{$type}})) {
-            my $t = $cache{$type}{$query}{timeout};
-            if ($t < $now) {
-                push @to_delete, $query;
-            }
-        }
-        
-        foreach my $q (@to_delete) {
-            delete $cache{$type}{$q};
-         }
-     }
-
-     $cache_cleanup = Danga::Socket->AddTimer(CACHE_CLEAN_INTERVAL, \&_cache_cleanup);
 }
 
 # ParaDNS
@@ -212,15 +184,18 @@ my %type_to_host = (
 sub event_read {
     my ParaDNS::Resolver $self = shift;
 
-    while (my $packet = $self->{res}->bgread($self->sock)) {
-        my $err = $self->{res}->errorstring;
+    my $sock = $self->sock;
+    my $res = $self->{res};
+    
+    while (my $packet = $res->bgread($sock)) {
+        my $err = $res->errorstring;
         my $answers = 0;
         my $header = $packet->header;
         my $id = $header->id;
         
         my $qobj = delete $self->{queries}->{$id};
         if (!$qobj) {
-            trace(1, "No query for id: $id\n");
+            trace(1, "No query for id: $id\n") if TRACE_LEVEL;
             return;
         }
         
@@ -230,25 +205,31 @@ sub event_read {
         foreach my $rr ($packet->answer) {
             if (my $host_method = $type_to_host{$rr->type}) {
                 my $host = $rr->$host_method;
-                my $type = $rr->type;
-                $type = 'A' if $type eq 'PTR';
+                if ($rr->type eq 'CNAME' && $qobj->recurse_cname) {
+                    # TODO: Should probably loop over the other answers here to check
+                    # for an answer to the question we're just about to ask...
+                    # (on the other hand, this works)
+                    
+                    my $packet = $res->make_query_packet($host, $qobj->type);
+
+                    my $packet_data = $packet->data;
+                    my $id = $packet->header->id;
+
+                    my $query = ParaDNS::Resolver::Query->new(
+                        $self, $qobj->asker, $host, $qobj->type, time, $id, $packet_data,
+                        ) or next;
+                    $self->{queries}->{$id} = $query;
+                    next;
+                }
+                #my $type = $rr->type;
+                #$type = 'A' if $type eq 'PTR';
                 # print "DNS Lookup $type $query = $host; TTL = ", $rr->ttl, "\n";
-                $cache{$type}{$query} = {
-                    value => $host,
-                    timeout => $now + $rr->ttl,
-                    ttl => $rr->ttl,
-                };
                 $qobj->run_callback($host, $rr->ttl);
             }
             elsif ($rr->type eq "MX") {
                 my $host = $rr->exchange;
                 my $preference = $rr->preference;
-                $cache{MX}{$query} = {
-                    value => [$host, $preference],
-                    timeout => $now + $rr->ttl,
-                    ttl => $rr->ttl,
-                };
-                $qobj->run_callback($cache{MX}{$query}{value}, $rr->ttl);
+                $qobj->run_callback([$host, $preference], $rr->ttl);
             }
             else {
                 # came back, but not a PTR or A record
@@ -259,23 +240,6 @@ sub event_read {
         if (!$answers) {
             if ($err eq "NXDOMAIN") {
                 # trace("found => NXDOMAIN\n");
-                my ($auth) = $packet->authority;
-                if ($auth) {
-                    # if there's an SOA, cache according to the TTL
-                    
-                    # NOTE: There's a bug here - NXDOMAIN should be cached
-                    # across all query types when we see it. But here we still
-                    # key on $type to make the code easier.
-                    my $timeout = $auth->ttl;
-                    if ($auth->minimum < $timeout) {
-                        $timeout = $auth->minimum;
-                    }
-                    $cache{$qobj->{type}}{$query} = {
-                        value => "NXDOMAIN",
-                        timeout => $now + $timeout,
-                        ttl => $timeout,
-                    };
-                }
                 $qobj->run_callback("NXDOMAIN");
             }
             elsif ($err eq "SERVFAIL") {
@@ -290,7 +254,7 @@ sub event_read {
                 $qobj->run_callback($err);
             }
             elsif($err) {
-                print("Unknown error: $err\n");
+                #print("Unknown error: $err\n");
                 $qobj->error($err) and next;
                 $self->{queries}->{$id} = $qobj;
             }
@@ -317,6 +281,7 @@ use fields qw( resolver asker host type timeout id data repeat ns nqueries );
 
 use constant MAX_QUERIES => 10;
 
+use constant TRACE_LEVEL => ($ENV{PARADNS_DEBUG} || 0);
 *trace = \&ParaDNS::trace;
 
 sub new {
@@ -327,11 +292,33 @@ sub new {
     # repeat is number of retries
     @$self{qw( repeat ns nqueries )} = ($ParaDNS::REQUERY,0,0);
     
-    trace(2, "NS Query: $self->{host} ($self->{id})\n");
+    trace(2, "NS Query: $self->{host} ($self->{id})\n") if TRACE_LEVEL >= 2;
     
     $self->send_query || return;
     
     return $self;
+}
+
+sub type {
+    my ParaDNS::Resolver::Query $self = shift;
+    $self->{type};
+}
+
+sub asker {
+    my ParaDNS::Resolver::Query $self = shift;
+    $self->{asker};
+}
+
+sub recurse_cname {
+    my ParaDNS::Resolver::Query $self = shift;
+    
+    if ($self->{type} eq 'A' || $self->{type} eq 'AAAA') {
+        if ($self->{nqueries} <= MAX_QUERIES) {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 #sub DESTROY {
@@ -342,7 +329,7 @@ sub new {
 sub timeout {
     my ParaDNS::Resolver::Query $self = shift;
     
-    trace(2, "NS Query timeout. Trying next host\n");
+    trace(2, "NS Query timeout. Trying next host\n") if TRACE_LEVEL >= 2;
     if ($self->send_query) {
         # had another NS to send to, reset timeout
         $self->{timeout} = time();
@@ -353,13 +340,13 @@ sub timeout {
     if (($self->{nqueries} <= MAX_QUERIES) &&
         ($self->{repeat} > 1))
     {
-        trace(2, "NS Query timeout. Next host failed. Trying loop\n");
+        trace(2, "NS Query timeout. Next host failed. Trying loop\n") if TRACE_LEVEL >= 2;
         $self->{repeat}--;
         $self->{ns} = 0;
         return $self->timeout();
     }
     
-    trace(2, "NS Query timeout. All failed. Running callback(TIMEOUT)\n");
+    trace(2, "NS Query timeout. All failed. Running callback(TIMEOUT)\n") if TRACE_LEVEL >= 2;
     # otherwise we really must timeout.
     $self->run_callback("TIMEOUT");
     return 1;
@@ -369,7 +356,7 @@ sub error {
     my ParaDNS::Resolver::Query $self = shift;
     my ($error) = @_;
     
-    trace(2, "NS Query error. Trying next host\n");
+    trace(2, "NS Query error. Trying next host\n") if TRACE_LEVEL >= 2;
     if ($self->send_query) {
         # had another NS to send to, reset timeout
         $self->{timeout} = time();
@@ -380,13 +367,13 @@ sub error {
     if (($self->{nqueries} <= MAX_QUERIES) &&
         ($self->{repeat} > 1))
     {
-        trace(2, "NS Query error. Next host failed. Trying loop\n");
+        trace(2, "NS Query error. Next host failed. Trying loop\n") if TRACE_LEVEL >= 2;
         $self->{repeat}--;
         $self->{ns} = 0;
         return $self->error($error);
     }
     
-    trace(2, "NS Query error. All failed. Running callback($error)\n");
+    trace(2, "NS Query error. All failed. Running callback($error)\n") if TRACE_LEVEL >= 2;
     # otherwise we really must timeout.
     $self->run_callback($error);
     return 1;
@@ -394,16 +381,17 @@ sub error {
 
 sub run_callback {
     my ParaDNS::Resolver::Query $self = shift;
-    trace(2, "NS Query callback($self->{host} = $_[0]\n");
+    trace(2, "NS Query callback($self->{host} = $_[0]\n") if TRACE_LEVEL >= 2;
     $self->{asker}->run_callback($_[0], $self->{host}, $_[1]);
 }
 
 sub send_query {
     my ParaDNS::Resolver::Query $self = shift;
     
-    my $dst = $self->{resolver}->ns($self->{ns}++);
+    my $res = $self->{resolver};
+    my $dst = $res->ns($self->{ns}++);
     return unless defined $dst;
-    if (!$self->{resolver}->sock->send($self->{data}, 0, $dst)) {
+    if (!$res->sock->send($self->{data}, 0, $dst)) {
         warn("socket send failed: $!");
         return;
     }

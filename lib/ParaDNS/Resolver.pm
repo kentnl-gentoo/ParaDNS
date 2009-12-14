@@ -89,8 +89,14 @@ sub _query {
     
     my $packet = $self->{res}->make_query_packet($host, $type);
     
-    my $packet_data = $packet->data;
     my $id = $packet->header->id;
+    while ($self->{queries}->{$id}) {
+        # ID already in use, try again :-(
+        trace(2, "Query ID $id already in use. Trying another\n") if TRACE_LEVEL >= 2;
+        $packet = $self->{res}->make_query_packet($host, $type);
+        $id = $packet->header->id;
+    }
+    my $packet_data = $packet->data;
     
     my $query = ParaDNS::Resolver::Query->new(
         $self, $asker, $host, $type, $now, $id, $packet_data,

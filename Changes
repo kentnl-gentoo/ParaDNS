@@ -1,5 +1,8 @@
 ParaDNS Changes
 
+1.9
+	- Fixed bug when duplicate IDs are given
+
 1.8
 	- CNAME recursion
 	- Added PARADNS_NO_CACHE env var support

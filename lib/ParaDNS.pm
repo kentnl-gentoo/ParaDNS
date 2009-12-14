@@ -4,7 +4,7 @@ package ParaDNS;
 # hosts you want to query, plus the callback. All the hard work is done
 # in ParaDNS::Resolver.
 
-our $VERSION = '1.8';
+our $VERSION = '1.9';
 our $TIMEOUT = $ENV{PARADNS_TIMEOUT} || 10;
 our $REQUERY = $ENV{PARADNS_REQUERY} || 2;
 
@@ -260,9 +260,7 @@ sub DESTROY {
                 if ($host =~ /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/) {
                     next if exists($self->{results}{"$4.$3.$2.$1.in-addr.arpa"});
                 }
-                print STDERR "DNS timeout (presumably) looking for $host after " . ($now - $self->{start}) . " secs\n";
-                use Data::Dumper qw(Dumper);
-                print STDERR Dumper($self);
+                print STDERR "DNS failure looking for $host after " . ($now - $self->{start}) . " secs (looked for $num_hosts, got " . keys(%{$self->{results}}) . ")\n";
                 $self->{callback}->("NXDOMAIN", $host);
             }
     }

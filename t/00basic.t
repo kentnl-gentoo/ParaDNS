@@ -41,7 +41,7 @@ ParaDNS->new(
     callback => sub {
         print "Got no answer: $_[0]\n";
         return if $nx_got_answer++;
-        ok($_[0] eq "NXDOMAIN", "Got nosuchhost.axkit.org doesn't exist");
+        ok($_[0] eq "NXDOMAIN", "Got nosuchhost.axkit.org doesn't exist ($_[0])");
         $done++;
     },
 );

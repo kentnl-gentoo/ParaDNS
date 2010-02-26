@@ -1,5 +1,8 @@
 ParaDNS Changes
 
+2.0
+    - Implemented DNS 0x20
+
 1.9
 	- Fixed bug when duplicate IDs are given
 

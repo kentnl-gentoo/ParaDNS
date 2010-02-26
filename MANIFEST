@@ -7,3 +7,4 @@ MANIFEST.SKIP
 README
 t/00basic.t
 META.yml                                 Module meta-data (added by MakeMaker)
+fast-rdns.pl

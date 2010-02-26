@@ -52,7 +52,7 @@ ParaDNS->new(
     callback => sub {
         print "Got answer mail.sergeant.org => $_[0]\n";
         return if $got_cname++;
-        ok($_[0] =~ /^\d+\.\d+\.\d+\.\d+$/, "translated mail.sergeant.org through a CNAME to an IP");
+        ok($_[0] =~ /^\d+\.\d+\.\d+\.\d+$/, "translated mail.sergeant.org through a CNAME to an IP ($_[0])");
         $done++;
     },
 );

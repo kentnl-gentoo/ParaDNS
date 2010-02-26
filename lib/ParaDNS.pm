@@ -4,7 +4,7 @@ package ParaDNS;
 # hosts you want to query, plus the callback. All the hard work is done
 # in ParaDNS::Resolver.
 
-our $VERSION = '1.9';
+our $VERSION = '2.0';
 our $TIMEOUT = $ENV{PARADNS_TIMEOUT} || 10;
 our $REQUERY = $ENV{PARADNS_REQUERY} || 2;
 

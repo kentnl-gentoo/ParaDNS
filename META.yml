@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:                ParaDNS
-version:             1.9
+version:             2.0
 abstract:            a DNS lookup class for the Danga::Socket framework
 license:             ~
 author:              

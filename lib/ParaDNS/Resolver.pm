@@ -10,6 +10,7 @@ use strict;
 no warnings 'deprecated';
 
 use constant TRACE_LEVEL => ($ENV{PARADNS_DEBUG} || 0);
+use constant NO_DNS0x20 => ($ENV{NO_DNS0x20} || 0);
 *trace = \&ParaDNS::trace;
 
 sub new {
@@ -83,9 +84,30 @@ sub pending {
     return keys(%{$self->{queries}});
 }
 
+# implements draft-vixie-dnsext-dns0x20-00
+sub dnsext_dns0x20 {
+  my ($string) = @_;
+  my $rnd;
+  my $have_rnd_bits = 0;
+  my $result = '';
+  for my $ic (unpack("C*",$string)) {
+    if (chr($ic) =~ /^[A-Za-z]\z/) {
+      if ($have_rnd_bits < 1) {
+        $rnd = rand(0x7fffffff);  $have_rnd_bits = 31;
+      }
+      $ic ^= 0x20  if $rnd & 1;  # flip the 0x20 bit in name if dice says so
+      $rnd = $rnd >> 1;  $have_rnd_bits--;
+    }
+    $result .= chr($ic);
+  }
+  return $result;
+}
+
 sub _query {
     my ParaDNS::Resolver $self = shift;
     my ($asker, $host, $type, $now) = @_;
+    
+    $host = dnsext_dns0x20($host) unless NO_DNS0x20;
     
     my $packet = $self->{res}->make_query_packet($host, $type);
     
@@ -207,10 +229,22 @@ sub event_read {
         
         my $query = $qobj->{host};
         
+        my ($question) = $packet->question; # only ever send one question
+        if (!$question) {
+            trace(1, "No question for id: $id. Should be: $query\n") if TRACE_LEVEL;
+            return;
+        }
+        
+        if ($question->qtype eq 'A' && $question->qname ne $query) {
+            trace(1, "Query mismatch for id: $id. $query ne " . $question->qname . "\n") if TRACE_LEVEL;
+            return;
+        }
+        
         my $now = time();
         foreach my $rr ($packet->answer) {
             if (my $host_method = $type_to_host{$rr->type}) {
                 my $host = $rr->$host_method;
+                trace(2, "Answer: " . $rr->type . " $host\n") if TRACE_LEVEL;
                 if ($rr->type eq 'CNAME' && $qobj->recurse_cname) {
                     # TODO: Should probably loop over the other answers here to check
                     # for an answer to the question we're just about to ask...
@@ -388,7 +422,7 @@ sub error {
 sub run_callback {
     my ParaDNS::Resolver::Query $self = shift;
     trace(2, "NS Query callback($self->{host} = $_[0]\n") if TRACE_LEVEL >= 2;
-    $self->{asker}->run_callback($_[0], $self->{host}, $_[1]);
+    $self->{asker}->run_callback($_[0], lc($self->{host}), $_[1]);
 }
 
 sub send_query {

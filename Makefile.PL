@@ -14,6 +14,7 @@ WriteMakefile(
                       },
     ABSTRACT_FROM  => 'lib/ParaDNS.pm',
     AUTHOR         => 'Matt Sergeant <matt@sergeant.org>',
-    clean          => {FILES => "tv.log"}
+    clean          => {FILES => "tv.log"},
+    EXE_FILES      => [qw(fast-rdns.pl)],
 );
     

@@ -40,7 +40,7 @@ sub new {
         }
     } 
     else {
-        foreach my $ns (@{ $res->{nameservers} }) {
+        foreach my $ns ( $res->nameservers ) {
             trace(2, "Using nameserver $ns:$res->{port}\n");
             my $dst_sockaddr = sockaddr_in($res->{'port'}, inet_aton($ns));
             push @{$self->{dst}}, $dst_sockaddr;
@@ -216,7 +216,6 @@ sub event_read {
     my $res = $self->{res};
     
     while (my $packet = $res->bgread($sock)) {
-        my $err = $res->errorstring;
         my $answers = 0;
         my $header = $packet->header;
         my $id = $header->id;
@@ -278,6 +277,7 @@ sub event_read {
             $answers++;
         }
         if (!$answers) {
+            my $err = $res->errorstring || $packet->header->rcode;
             if ($err eq "NXDOMAIN") {
                 # trace("found => NXDOMAIN\n");
                 $qobj->run_callback("NXDOMAIN");

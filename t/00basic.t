@@ -1,10 +1,15 @@
 #!/usr/bin/perl -w
 
-use Test::More tests => 5;
+
+use Test::More tests => 6;
 
 $|++;
 
 use_ok('ParaDNS');
+use_ok('ParaDNS::Resolver');
+
+SKIP: {
+  skip "NO_NETWORK_TESTING set", 4 if $ENV{NO_NETWORK_TESTING};
 
 my $done = 0;
 
@@ -59,3 +64,4 @@ ParaDNS->new(
 
 Danga::Socket->EventLoop;
 
+}
